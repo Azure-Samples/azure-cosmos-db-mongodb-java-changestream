@@ -1,37 +1,38 @@
 package com.azure.cosmos.mongostream;
 
-import java.util.List;
-import java.util.Properties;
-
-import org.bson.BsonDocument;
-import org.bson.Document;
-import org.bson.conversions.Bson;
+import static com.mongodb.client.model.Projections.fields;
+import static com.mongodb.client.model.Projections.include;
 import static java.util.Arrays.asList;
 
 import java.io.FileInputStream;
 import java.io.IOException;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Properties;
+
+import org.bson.BsonDocument;
+import org.bson.BsonTimestamp;
+import org.bson.Document;
+import org.bson.conversions.Bson;
 
 import com.mongodb.MongoClient;
 import com.mongodb.MongoClientURI;
+import com.mongodb.client.ChangeStreamIterable;
 import com.mongodb.client.MongoChangeStreamCursor;
 import com.mongodb.client.MongoCollection;
 import com.mongodb.client.MongoDatabase;
 import com.mongodb.client.MongoIterable;
-import com.mongodb.client.model.Updates;
 import com.mongodb.client.model.Aggregates;
 import com.mongodb.client.model.Filters;
+import com.mongodb.client.model.Updates;
 import com.mongodb.client.model.changestream.ChangeStreamDocument;
 import com.mongodb.client.model.changestream.FullDocument;
-
-import java.util.Arrays;
-
-import static com.mongodb.client.model.Projections.*;
 
 /**
  * This sample will demonstrate the usage of ChangeStream in Azure Cosmos DB -
  * Mongo API It will provide three variations #1 Simply reading the ChangeStream
- * #2 Resume from last state #3 Filter the stream
- * #4 it will high availability capability in consumers via lease logic
+ * #2 Resume from last state #3 Filter the stream #4 it will high availability
+ * capability in consumers via lease logic
  */
 public class App {
 
@@ -52,6 +53,8 @@ public class App {
 		yes, no
 	}
 
+	private static BsonTimestamp startAtOperationTime;
+
 	public static void init() throws IOException {
 		Properties prop = new Properties();
 
@@ -70,6 +73,7 @@ public class App {
 		connectionString = prop.getProperty("ConnectionString");
 		databaseName = prop.getProperty("DatabaseName");
 		collectionName = prop.getProperty("CollectionName");
+
 	}
 
 	private static enableLease withLease;
@@ -86,9 +90,10 @@ public class App {
 
 	public static void main(String[] args) throws IOException {
 		init();
-		//If you don't want high availability for consumer the simply refer this
-		//part of the code.
+
 		if (withLease == enableLease.no) {
+			// If you don't want high availability for consumer the simply refer this
+			// part of the code.
 			activeWorker(null);
 		}
 		if (withLease == enableLease.yes) {
@@ -294,7 +299,9 @@ public class App {
 			// #1 Simple example to seek changes
 
 			// Create cursor with update_lookup
-			cursor = collection.watch(pipeline).fullDocument(FullDocument.UPDATE_LOOKUP).cursor();
+			ChangeStreamIterable<Document> c = collection.watch(pipeline);
+			c.fullDocument(FullDocument.UPDATE_LOOKUP);
+			cursor = c.cursor();
 
 			Document document = new Document("name", "doc-in-step-1-" + Math.random());
 			collection.insertOne(document);
@@ -309,6 +316,7 @@ public class App {
 				// Let is pick the token which will help us resuming
 				// You can save this token in any persistent storage and retrieve it later
 				resumeToken = csDoc.getResumeToken();
+
 				// Printing the token
 				System.out.println(resumeToken);
 
@@ -368,14 +376,81 @@ public class App {
 				ChangeStreamDocument<Document> csDoc = cursor.tryNext();
 				if (csDoc != null) {
 					resumeToken = csDoc.getResumeToken();
-					System.out.println(resumeToken);
+					startAtOperationTime = new BsonTimestamp((int)System.currentTimeMillis() / 1000, 1);
+					System.out.println(resumeToken + " Time " + startAtOperationTime);
 					System.out.println(csDoc.getFullDocument());
+				} else {
+					break;
 				}
 				if (withLease == enableLease.yes)
 					leaseHealthCheck(leaseColl, resumeToken);
 
 			}
+			cursor.close();
+			// #4 Ditch the resume token, now let us use the time
 
+			match = Aggregates.match(Filters.and(Filters.in("operationType", asList("update", "replace", "insert")),
+					Filters.eq("fullDocument.name", "cosmosdb")));
+
+			pipeline = Arrays.asList(match, project);
+
+			cursor = collection.watch(pipeline).fullDocument(FullDocument.UPDATE_LOOKUP)
+					.startAtOperationTime(startAtOperationTime).cursor();
+			// let us insert two documents
+			document = new Document("name", "doc-in-step-4-" + Math.random());
+			collection.insertOne(document);
+			document = new Document("name", "cosmosdb");
+			collection.insertOne(document);
+			BsonDocument resumeFromDoc = null;
+			while (true) {
+				// We shouldn't get he change which have name!=OOP
+				ChangeStreamDocument<Document> csDoc = cursor.tryNext();
+				if (csDoc != null) {
+					resumeFromDoc = csDoc.getFullDocument().toBsonDocument(BsonDocument.class,
+							MongoClient.getDefaultCodecRegistry());
+					startAtOperationTime = csDoc.getClusterTime();
+					System.out.println(startAtOperationTime);
+					System.out.println(csDoc.getFullDocument());
+				} else {
+					break;
+				}
+				if (withLease == enableLease.yes)
+					leaseHealthCheck(leaseColl, resumeToken);
+
+			}
+			cursor.close();
+			// #5 Let us use startAfter, this will create a new change stream returning the
+			// first notification after the token.
+			// This will allow users to watch collections that have been dropped and
+			// recreated collections without missing any notifications.
+
+			match = Aggregates.match(Filters.and(Filters.in("operationType", asList("update", "replace", "insert")),
+					Filters.eq("fullDocument.name", "cosmosdb")));
+
+			pipeline = Arrays.asList(match, project);
+
+			cursor = collection.watch(pipeline).fullDocument(FullDocument.UPDATE_LOOKUP).startAfter(resumeFromDoc)
+					.cursor();
+			// let us insert two documents
+			document = new Document("name", "doc-in-step-4-" + Math.random());
+			collection.insertOne(document);
+			document = new Document("name", "cosmosdb");
+			collection.insertOne(document);
+
+			while (true) {
+				// We shouldn't get he change which have name!=OOP
+				ChangeStreamDocument<Document> csDoc = cursor.tryNext();
+				if (csDoc != null) {
+					startAtOperationTime = csDoc.getClusterTime();
+					System.out.println(startAtOperationTime);
+					System.out.println(csDoc.getFullDocument());
+				} else {
+					break;
+				}
+				if (withLease == enableLease.yes)
+					leaseHealthCheck(leaseColl, resumeToken);
+
+			}
 		} catch (Exception ex) {
 			System.out.println(ex.getMessage());
 		} finally {
