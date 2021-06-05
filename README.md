@@ -27,6 +27,29 @@ Cosmos DB - Mongo API in v3.6 has support for ChangeStream and this sample will 
 - Access to Cosmos DB - Mongo API / Emulator is also supported
 - Java
 
+## Introduction
+This is a sample written in JAVA to demonstrate Azure Cosmos DB - Mongo API's ChangeStream functionality.
+
+## WithLease Flag
+There is configuration file in this sample at mongostream/src/main/java/com/azure/cosmos/mongostream/config.properties in which there is a property called "withlease" by default it is having yes flag.
+Please mention no, if you are not looking for high availability in the consumer process.
+
+## Lease Requirement
+Azure Cosmos DB - Mongo API’s ChangeStream is a great way to keep a tap on changes in source collection.
+If you would like to do run the consumer in High Availability mode to make consumer to make it durable.
+This is not available Out-Of-The-Box OOTB hence custom code is needed.
+
+## The Solution
+
+* This sample will demonstrate, how to run more than one copy of the same consumer.
+* There should be a Master/Slave model for consumers and only one copy of consumer must be consuming the feed from source collection.
+* The consumer must maintain the state in database such that slave can keep monitoring.
+* Slave can become master as soon as it finds master stops updating the healthcheck.
+
+## Process Flow explanation of the lease logic
+
+![picture alt](process-flow-diagram.png "Process flow diagram")
+
 ## Contributing
 
 This project welcomes contributions and suggestions.  Most contributions require you to agree to a
